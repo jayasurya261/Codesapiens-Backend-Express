@@ -9,6 +9,10 @@ import { createClient } from "@supabase/supabase-js";
 import { parse } from "csv-parse";
 import dotenv from "dotenv";
 import { v2 as cloudinary } from "cloudinary";
+import rateLimit from "express-rate-limit";
+import { body, validationResult } from "express-validator";
+import helmet from "helmet";
+import timeout from "express-timeout-handler";
 
 dotenv.config({ debug: true }); // Enable dotenv debug for better logging
 
@@ -36,7 +40,50 @@ const storage = multer.diskStorage({
   },
 });
 
-const upload = multer({ storage });
+const upload = multer({
+  storage,
+  limits: { fileSize: 1 * 1024 * 1024 }, // 1 MB limit
+  fileFilter: (req, file, cb) => {
+    const ext = path.extname(file.originalname).toLowerCase();
+    if (ext !== '.pdf') {
+      return cb(new Error('Only PDF files are allowed'), false);
+    }
+    if (file.mimetype !== 'application/pdf') {
+      return cb(new Error('File must be a valid PDF'), false);
+    }
+    cb(null, true);
+  },
+});
+
+// Security Middleware
+app.use(helmet()); // Secure HTTP headers
+app.disable('x-powered-by'); // Disable x-powered-by header
+app.use(timeout.handler({
+  timeout: 10000, // 10 seconds
+  onTimeout: (req, res) => {
+    res.status(408).json({ success: false, error: 'Request timed out' });
+  },
+}));
+
+// Rate Limiting Middleware
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // Limit each IP to 100 requests per windowMs
+  message: 'Too many requests from this IP, please try again later.',
+});
+app.use(limiter);
+
+const uploadLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 5, // Limit each IP to 5 upload requests per windowMs
+  message: 'Too many upload requests, please try again later.',
+});
+
+const captchaLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 50, // Limit each IP to 50 captcha verifications
+  message: 'Too many captcha verification requests, please try again later.',
+});
 
 // CORS Middleware
 app.use(cors({
@@ -45,7 +92,6 @@ app.use(cors({
   allowedHeaders: ["Content-Type", "Authorization", "keyword", "state", "district", "offset"],
 }));
 
-// Additional middleware to ensure CORS headers
 app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
@@ -125,59 +171,89 @@ app.post("/colleges/total", (req, res) => {
   res.json({ total: colleges.length });
 });
 
-app.post("/colleges/search", (req, res) => {
-  if (!colleges) return res.status(500).json({ error: "Data not loaded" });
+app.post(
+  "/colleges/search",
+  [
+    body('keyword').optional().isString().trim().escape(),
+  ],
+  (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ success: false, errors: errors.array() });
+    }
+    if (!colleges) return res.status(500).json({ error: "Data not loaded" });
 
-  const keyword = req.headers.keyword?.toLowerCase() || "";
-  const result = colleges
-    .filter((row) => !keyword || row[2]?.toLowerCase().includes(keyword))
-    .map((row) => {
-      const cleanedRow = [...row];
-      cleanedRow[2] = cleanedRow[2].replace(/\:[^>]*\)/gi, "").replace(/($$   Id)/gi, "");
-      cleanedRow[1] = cleanedRow[1].replace(/\:[^>]*   $$/gi, "").replace(/($$   Id)/gi, "");
-      return cleanedRow;
-    });
+    const keyword = req.headers.keyword?.toLowerCase() || "";
+    const result = colleges
+      .filter((row) => !keyword || row[2]?.toLowerCase().includes(keyword))
+      .map((row) => {
+        const cleanedRow = [...row];
+        cleanedRow[2] = cleanedRow[2].replace(/\:[^>]*\)/gi, "").replace(/($$   Id)/gi, "");
+        cleanedRow[1] = cleanedRow[1].replace(/\:[^>]*   $$/gi, "").replace(/($$   Id)/gi, "");
+        return cleanedRow;
+      });
 
-  res.json(result);
-});
+    res.json(result);
+  }
+);
 
-app.post("/colleges/state", (req, res) => {
-  if (!colleges) return res.status(500).json({ error: "Data not loaded" });
+app.post(
+  "/colleges/state",
+  [
+    body('state').notEmpty().withMessage('State is required').isString().trim().escape(),
+    body('offset').optional().isInt({ min: 0 }).withMessage('Offset must be a non-negative integer'),
+  ],
+  (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ success: false, errors: errors.array() });
+    }
+    if (!colleges) return res.status(500).json({ error: "Data not loaded" });
 
-  const state = req.headers.state?.toLowerCase();
-  const offset = Number(req.headers.offset) || 0;
-  if (!state) return res.status(400).json({ error: "Missing state" });
+    const state = req.headers.state?.toLowerCase();
+    const offset = Number(req.headers.offset) || 0;
 
-  const result = colleges
-    .filter((row) => row[4]?.toLowerCase().includes(state))
-    .map((row) => {
-      const cleanedRow = [...row];
-      cleanedRow[2] = cleanedRow[2].replace(/\:[^>]*   $$/gi, "").replace(/($$   Id)/gi, "");
-      cleanedRow[1] = cleanedRow[1].replace(/\:[^>]*   $$/gi, "").replace(/($$   Id)/gi, "");
-      return cleanedRow;
-    });
+    const result = colleges
+      .filter((row) => row[4]?.toLowerCase().includes(state))
+      .map((row) => {
+        const cleanedRow = [...row];
+        cleanedRow[2] = cleanedRow[2].replace(/\:[^>]*   $$/gi, "").replace(/($$   Id)/gi, "");
+        cleanedRow[1] = cleanedRow[1].replace(/\:[^>]*   $$/gi, "").replace(/($$   Id)/gi, "");
+        return cleanedRow;
+      });
 
-  res.json(result.slice(offset, offset + 10));
-});
+    res.json(result.slice(offset, offset + 10));
+  }
+);
 
-app.post("/colleges/district", (req, res) => {
-  if (!colleges) return res.status(500).json({ error: "Data not loaded" });
+app.post(
+  "/colleges/district",
+  [
+    body('district').notEmpty().withMessage('District is required').isString().trim().escape(),
+    body('offset').optional().isInt({ min: -1 }).withMessage('Offset must be an integer'),
+  ],
+  (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ success: false, errors: errors.array() });
+    }
+    if (!colleges) return res.status(500).json({ error: "Data not loaded" });
 
-  const district = req.headers.district?.toLowerCase();
-  const offset = Number(req.headers.offset) || -1;
-  if (!district) return res.status(400).json({ error: "Missing district" });
+    const district = req.headers.district?.toLowerCase();
+    const offset = Number(req.headers.offset) || -1;
 
-  const result = colleges
-    .filter((row) => row[5]?.toLowerCase().includes(district))
-    .map((row) => {
-      const cleanedRow = [...row];
-      cleanedRow[2] = cleanedRow[2].replace(/\:[^>]*   $$/gi, "").replace(/($$   Id)/gi, "");
-      cleanedRow[1] = cleanedRow[1].replace(/\:[^>]*   $$/gi, "").replace(/(\(Id)/gi, "");
-      return cleanedRow;
-    });
+    const result = colleges
+      .filter((row) => row[5]?.toLowerCase().includes(district))
+      .map((row) => {
+        const cleanedRow = [...row];
+        cleanedRow[2] = cleanedRow[2].replace(/\:[^>]*   $$/gi, "").replace(/($$   Id)/gi, "");
+        cleanedRow[1] = cleanedRow[1].replace(/\:[^>]*   $$/gi, "").replace(/(\(Id)/gi, "");
+        return cleanedRow;
+      });
 
-  res.json(offset === -1 ? result : result.slice(offset, offset + 10));
-});
+    res.json(offset === -1 ? result : result.slice(offset, offset + 10));
+  }
+);
 
 app.post("/allstates", (req, res) => {
   if (!colleges) return res.status(500).json({ error: "Data not loaded" });
@@ -185,17 +261,25 @@ app.post("/allstates", (req, res) => {
   res.json(result);
 });
 
-app.post("/districts", (req, res) => {
-  if (!colleges) return res.status(500).json({ error: "Data not loaded" });
+app.post(
+  "/districts",
+  [
+    body('state').notEmpty().withMessage('State is required').isString().trim().escape(),
+  ],
+  (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ success: false, errors: errors.array() });
+    }
+    if (!colleges) return res.status(500).json({ error: "Data not loaded" });
 
-  const state = req.headers.state?.toLowerCase();
-  if (!state) return res.status(400).json({ error: "Missing state" });
+    const state = req.headers.state?.toLowerCase();
+    const result = [...new Set(colleges.filter((row) => row[4]?.toLowerCase().includes(state)).map((row) => row[5]))];
+    res.json(result);
+  }
+);
 
-  const result = [...new Set(colleges.filter((row) => row[4]?.toLowerCase().includes(state)).map((row) => row[5]))];
-  res.json(result);
-});
-
-app.post("/verify-hcaptcha", async (req, res) => {
+app.post("/verify-hcaptcha", captchaLimiter, async (req, res) => {
   const { token } = req.body;
   if (!token) return res.status(400).json({ success: false, error: "missing-token" });
 
@@ -221,80 +305,70 @@ app.post("/verify-hcaptcha", async (req, res) => {
   }
 });
 
-app.post("/upload-resume", upload.single("resume"), async (req, res) => {
-  const inputPath = req.file?.path;
-  if (!inputPath) return res.status(400).json({ success: false, error: "No file uploaded" });
-
-  const userId = req.body.userId;
-  if (!userId) return res.status(400).json({ success: false, error: "Missing userId" });
-
-  const outputPath = path.join(uploadDir, `compressed_${Date.now()}.pdf`);
-
-  try {
-    // Validate file type
-    const allowedTypes = ["application/pdf", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"];
-    if (!allowedTypes.includes(req.file.mimetype)) {
-      throw new Error("Invalid file type. Only PDF or DOCX allowed.");
+app.post(
+  "/upload-resume",
+  uploadLimiter,
+  upload.single("resume"),
+  [
+    body('userId').notEmpty().withMessage('userId is required').isString().withMessage('userId must be a string'),
+  ],
+  async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ success: false, errors: errors.array() });
     }
 
-    // Validate file size (2MB)
-    if (req.file.size > 2 * 1024 * 1024) {
-      throw new Error("File size exceeds 2MB limit.");
-    }
+    const inputPath = req.file?.path;
+    if (!inputPath) return res.status(400).json({ success: false, error: "No file uploaded" });
 
-    // Compress PDF if it's a PDF
-    if (req.file.mimetype === "application/pdf") {
+    const userId = req.body.userId;
+    const outputPath = path.join(uploadDir, `compressed_${Date.now()}.pdf`);
+
+    try {
       await compressPDF(inputPath, outputPath);
-    } else {
-      fs.copyFileSync(inputPath, outputPath);
+
+      const fileName = `resumes/${userId}-resume.pdf`;
+      const result = await cloudinary.uploader.upload(outputPath, {
+        resource_type: "raw",
+        public_id: fileName,
+        folder: "resumes",
+        overwrite: true,
+        upload_preset: "resumes_unsigned",
+      });
+
+      const { error: updateError } = await supabase
+        .from("users")
+        .update({ resume_url: result.secure_url })
+        .eq("uid", userId);
+
+      if (updateError) {
+        throw new Error(`Failed to update resume URL in database: ${updateError.message}`);
+      }
+
+      try {
+        if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
+        if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
+      } catch (cleanupErr) {
+        console.error("[cAPi] : Cleanup failed", cleanupErr.message);
+      }
+
+      console.log("[cAPi] : Resume uploaded successfully for user:", userId, "URL:", result.secure_url);
+      res.json({ success: true, url: result.secure_url });
+    } catch (error) {
+      console.error("[cAPi] : Resume upload error", error.message);
+
+      try {
+        if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
+        if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
+      } catch (cleanupErr) {
+        console.error("[cAPi] : Cleanup failed", cleanupErr.message);
+      }
+
+      res.status(500).json({ success: false, error: error.message });
     }
-
-    // Upload to Cloudinary
-    const fileName = `resumes/${userId}-resume.pdf`;
-    const result = await cloudinary.uploader.upload(outputPath, {
-      resource_type: "raw",
-      public_id: fileName,
-      folder: "resumes",
-      overwrite: true,
-      upload_preset: "resumes_unsigned",
-    });
-
-    // Update Supabase with resume URL
-    const { error: updateError } = await supabase
-      .from("users")
-      .update({ resume_url: result.secure_url })
-      .eq("uid", userId);
-
-    if (updateError) {
-      throw new Error(`Failed to update resume URL in database: ${updateError.message}`);
-    }
-
-    // Cleanup local files
-    try {
-      if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
-      if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
-    } catch (cleanupErr) {
-      console.error("[cAPi] : Cleanup failed", cleanupErr.message);
-    }
-
-    console.log("[cAPi] : Resume uploaded successfully for user:", userId, "URL:", result.secure_url);
-    res.json({ success: true, url: result.secure_url });
-  } catch (error) {
-    console.error("[cAPi] : Resume upload error", error.message);
-
-    // Cleanup on failure
-    try {
-      if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
-      if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
-    } catch (cleanupErr) {
-      console.error("[cAPi] : Cleanup failed", cleanupErr.message);
-    }
-
-    res.status(500).json({ success: false, error: error.message });
   }
-});
+);
 
-// Explicit OPTIONS handler for /delete-resume
 app.options("/delete-resume", (req, res) => {
   res.set({
     "Access-Control-Allow-Origin": "*",
@@ -304,46 +378,56 @@ app.options("/delete-resume", (req, res) => {
   res.sendStatus(204);
 });
 
-app.delete("/delete-resume", async (req, res) => {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  const { userId } = req.body;
-  if (!userId) return res.status(400).json({ success: false, error: "Missing userId" });
-
-  try {
-    const publicId = `resumes/${userId}-resume.pdf`;
-    console.log("[cAPi] : Attempting to delete resume with public_id:", publicId);
-
-    const result = await cloudinary.uploader.destroy(publicId, {
-      resource_type: "raw",
-      invalidate: true,
-    });
-
-    console.log("[cAPi] : Cloudinary delete result:", result);
-
-    if (result.result === "ok" || result.result === "not found") {
-      const { error: updateError } = await supabase
-        .from("users")
-        .update({ resume_url: null })
-        .eq("uid", userId);
-
-      if (updateError) {
-        console.error("[cAPi] : Supabase update error:", updateError.message);
-        throw new Error(`Failed to update database: ${updateError.message}`);
-      }
-
-      console.log("[cAPi] : Resume deletion processed for user:", userId, "Cloudinary result:", result.result);
-      res.json({
-        success: true,
-        message: result.result === "ok" ? "Resume deleted successfully" : "Resume not found in storage, database updated",
-      });
-    } else {
-      throw new Error(`Cloudinary deletion failed: ${result.result}`);
+app.delete(
+  "/delete-resume",
+  [
+    body('userId').notEmpty().withMessage('userId is required').isString().withMessage('userId must be a string'),
+  ],
+  async (req, res) => {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ success: false, errors: errors.array() });
     }
-  } catch (error) {
-    console.error("[cAPi] : Resume deletion error:", error.message);
-    res.status(500).json({ success: false, error: error.message });
+
+    const { userId } = req.body;
+
+    try {
+      const publicId = `resumes/${userId}-resume.pdf`;
+      console.log("[cAPi] : Attempting to delete resume with public_id:", publicId);
+
+      const result = await cloudinary.uploader.destroy(publicId, {
+        resource_type: "raw",
+        invalidate: true,
+      });
+
+      console.log("[cAPi] : Cloudinary delete result:", result);
+
+      if (result.result === "ok" || result.result === "not found") {
+        const { error: updateError } = await supabase
+          .from("users")
+          .update({ resume_url: null })
+          .eq("uid", userId);
+
+        if (updateError) {
+          console.error("[cAPi] : Supabase update error:", updateError.message);
+          throw new Error(`Failed to update database: ${updateError.message}`);
+        }
+
+        console.log("[cAPi] : Resume deletion processed for user:", userId, "Cloudinary result:", result.result);
+        res.json({
+          success: true,
+          message: result.result === "ok" ? "Resume deleted successfully" : "Resume not found in storage, database updated",
+        });
+      } else {
+        throw new Error(`Cloudinary deletion failed: ${result.result}`);
+      }
+    } catch (error) {
+      console.error("[cAPi] : Resume deletion error:", error.message);
+      res.status(500).json({ success: false, error: error.message });
+    }
   }
-});
+);
 
 // Start server
 loadCSV()
