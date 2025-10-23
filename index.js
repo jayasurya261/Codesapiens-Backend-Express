@@ -188,8 +188,8 @@ app.post(
       .filter((row) => !keyword || row[2]?.toLowerCase().includes(keyword))
       .map((row) => {
         const cleanedRow = [...row];
-        cleanedRow[2] = cleanedRow[2].replace(/\:[^>]*\)/gi, "").replace(/($$   Id)/gi, "");
-        cleanedRow[1] = cleanedRow[1].replace(/\:[^>]*   $$/gi, "").replace(/($$   Id)/gi, "");
+        cleanedRow[2] = cleanedRow[2].replace(/\s*\(ID?:[^)]*\)$/i, "").trim();
+        cleanedRow[1] = cleanedRow[1].replace(/\s*\(ID?:[^)]*\)$/i, "").trim();
         return cleanedRow;
       });
 
@@ -217,8 +217,8 @@ app.post(
       .filter((row) => row[4]?.toLowerCase().includes(state))
       .map((row) => {
         const cleanedRow = [...row];
-        cleanedRow[2] = cleanedRow[2].replace(/\:[^>]*   $$/gi, "").replace(/($$   Id)/gi, "");
-        cleanedRow[1] = cleanedRow[1].replace(/\:[^>]*   $$/gi, "").replace(/($$   Id)/gi, "");
+        cleanedRow[2] = cleanedRow[2].replace(/\s*\(ID?:[^)]*\)$/i, "").trim();
+        cleanedRow[1] = cleanedRow[1].replace(/\s*\(ID?:[^)]*\)$/i, "").trim();
         return cleanedRow;
       });
 
@@ -246,8 +246,8 @@ app.post(
       .filter((row) => row[5]?.toLowerCase().includes(district))
       .map((row) => {
         const cleanedRow = [...row];
-        cleanedRow[2] = cleanedRow[2].replace(/\:[^>]*   $$/gi, "").replace(/($$   Id)/gi, "");
-        cleanedRow[1] = cleanedRow[1].replace(/\:[^>]*   $$/gi, "").replace(/(\(Id)/gi, "");
+        cleanedRow[2] = cleanedRow[2].replace(/\s*\(ID?:[^)]*\)$/i, "").trim();
+        cleanedRow[1] = cleanedRow[1].replace(/\s*\(ID?:[^)]*\)$/i, "").trim();
         return cleanedRow;
       });
 
