@@ -14,7 +14,7 @@ import { body, validationResult } from "express-validator";
 import helmet from "helmet";
 import timeout from "express-timeout-handler";
 
-dotenv.config({ debug: true }); // Enable dotenv debug for better logging
+dotenv.config({ debug: true });
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -56,8 +56,8 @@ const upload = multer({
 });
 
 // Security Middleware
-app.use(helmet()); // Secure HTTP headers
-app.disable('x-powered-by'); // Disable x-powered-by header
+app.use(helmet());
+app.disable('x-powered-by');
 app.use(timeout.handler({
   timeout: 10000, // 10 seconds
   onTimeout: (req, res) => {
@@ -68,26 +68,26 @@ app.use(timeout.handler({
 // Rate Limiting Middleware
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100, // Limit each IP to 100 requests per windowMs
+  max: 100,
   message: 'Too many requests from this IP, please try again later.',
 });
 app.use(limiter);
 
 const uploadLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 5, // Limit each IP to 5 upload requests per windowMs
+  windowMs: 15 * 60 * 1000,
+  max: 5,
   message: 'Too many upload requests, please try again later.',
 });
 
 const captchaLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 50, // Limit each IP to 50 captcha verifications
+  windowMs: 15 * 60 * 1000,
+  max: 50,
   message: 'Too many captcha verification requests, please try again later.',
 });
 
 // CORS Middleware
 app.use(cors({
-  origin: "*", // Allow all origins
+  origin: "*",
   methods: ["GET", "POST", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization", "keyword", "state", "district", "offset"],
 }));
@@ -163,7 +163,16 @@ async function compressPDF(inputPath, outputPath) {
 
 // Routes
 app.get("/", (req, res) => {
-  res.send("Colleges API : SriGuru Institute of Technology, Coimbatore");
+  res.json({ 
+    message: "Colleges API : SriGuru Institute of Technology, Coimbatore",
+    status: "running",
+    version: "1.0.0",
+    endpoints: {
+      colleges: "/colleges/*",
+      captcha: "/verify-turnstile, /verify-hcaptcha",
+      resume: "/upload-resume, /delete-resume"
+    }
+  });
 });
 
 app.post("/colleges/total", (req, res) => {
@@ -305,6 +314,62 @@ app.post("/verify-hcaptcha", captchaLimiter, async (req, res) => {
   }
 });
 
+app.post("/verify-turnstile", captchaLimiter, async (req, res) => {
+  const { token } = req.body;
+  
+  console.log("[cAPi] : Received Turnstile verification request");
+  console.log("[cAPi] : Token present:", !!token);
+  
+  if (!token) {
+    console.error("[cAPi] : No token provided in request");
+    return res.status(400).json({ success: false, error: "missing-token" });
+  }
+
+  const secret = process.env.TURNSTILE_SECRET;
+  if (!secret) {
+    console.error("[cAPi] : Missing TURNSTILE_SECRET environment variable");
+    return res.status(500).json({ success: false, error: "missing-secret" });
+  }
+
+  try {
+    console.log("[cAPi] : Verifying Turnstile token with Cloudflare");
+    const params = new URLSearchParams();
+    params.append("secret", secret);
+    params.append("response", token);
+
+    const verifyRes = await fetch("https://challenges.cloudflare.com/turnstile/v0/siteverify", {
+      method: "POST",
+      body: params,
+    });
+
+    if (!verifyRes.ok) {
+      console.error("[cAPi] : Cloudflare API returned non-OK status:", verifyRes.status);
+      throw new Error(`Cloudflare API error: ${verifyRes.status}`);
+    }
+
+    const body = await verifyRes.json();
+    console.log("[cAPi] : Turnstile verification completed", { 
+      success: body.success, 
+      errorCodes: body['error-codes'],
+      hostname: body.hostname,
+      timestamp: body.challenge_ts
+    });
+
+    if (body.success) {
+      return res.json({ success: true, message: "Verification successful" });
+    } else {
+      console.error("[cAPi] : Turnstile verification failed", body['error-codes']);
+      return res.status(400).json({ 
+        success: false, 
+        error: body['error-codes']?.join(', ') || "Verification failed" 
+      });
+    }
+  } catch (err) {
+    console.error("[cAPi] : Turnstile verification error", err.message);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 app.post(
   "/upload-resume",
   uploadLimiter,
@@ -429,11 +494,44 @@ app.delete(
   }
 );
 
+// Health check endpoint
+app.get("/health", (req, res) => {
+  res.json({
+    status: "healthy",
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+    csvLoaded: !!colleges,
+    totalColleges: colleges ? colleges.length : 0
+  });
+});
+
+// 404 handler
+app.use((req, res) => {
+  res.status(404).json({
+    success: false,
+    error: "Endpoint not found",
+    path: req.path,
+    method: req.method
+  });
+});
+
+// Error handler
+app.use((err, req, res, next) => {
+  console.error("[cAPi] : Unhandled error:", err);
+  res.status(500).json({
+    success: false,
+    error: err.message || "Internal server error"
+  });
+});
+
 // Start server
 loadCSV()
   .then(() => {
     app.listen(PORT, () => {
-      console.log(`Server listening on port ${PORT}`);
+      console.log(`[cAPi] : Server listening on port ${PORT}`);
+      console.log(`[cAPi] : Environment: ${process.env.NODE_ENV || 'development'}`);
+      console.log(`[cAPi] : CORS enabled for all origins`);
+      console.log(`[cAPi] : API Base URL: http://localhost:${PORT}`);
     });
   })
   .catch((err) => {
