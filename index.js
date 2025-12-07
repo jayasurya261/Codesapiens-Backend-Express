@@ -692,10 +692,17 @@ app.post("/api/send-blog-email", async (req, res) => {
 
     console.log("[cAPi] : 📝 Blog object received:", JSON.stringify({ id: blog.id, title: blog.title, keys: Object.keys(blog) }));
 
+    // Add Vercel protection bypass token if available
+    const bypassToken = process.env.VERCEL_PROTECTION_BYPASS;
+    let webhookUrl = `${baseUrl}/api/qstash-send-email`;
+    if (bypassToken) {
+      webhookUrl += `?x-vercel-set-bypass-cookie=true&x-vercel-protection-bypass=${bypassToken}`;
+    }
+
     // Since we already have the full blog, send it directly (it's small enough per email)
     const queuePromises = emails.map(email =>
       qstashClient.publishJSON({
-        url: `${baseUrl}/api/qstash-send-email`,
+        url: webhookUrl,
         body: { email, blog: { id: blog.id, title: blog.title, content: blog.content, excerpt: blog.excerpt, cover_image: blog.cover_image, slug: blog.slug } },
         retries: 3,
       })
@@ -775,9 +782,16 @@ app.post("/api/send-blog-email-all", async (req, res) => {
       ? `https://${process.env.VERCEL_URL}`
       : process.env.BASE_URL;
 
+    // Add Vercel protection bypass token if available
+    const bypassToken = process.env.VERCEL_PROTECTION_BYPASS;
+    let webhookUrl = `${baseUrl}/api/qstash-send-email`;
+    if (bypassToken) {
+      webhookUrl += `?x-vercel-set-bypass-cookie=true&x-vercel-protection-bypass=${bypassToken}`;
+    }
+
     const queuePromises = emails.map(email =>
       qstashClient.publishJSON({
-        url: `${baseUrl}/api/qstash-send-email`,
+        url: webhookUrl,
         body: { email, blogId: blog.id },
         retries: 3,
       })
