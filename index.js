@@ -778,7 +778,7 @@ app.post("/api/send-blog-email-all", async (req, res) => {
     const queuePromises = emails.map(email =>
       qstashClient.publishJSON({
         url: `${baseUrl}/api/qstash-send-email`,
-        body: { email, blog: { id: blog.id, title: blog.title, content: blog.content, excerpt: blog.excerpt, cover_image: blog.cover_image, slug: blog.slug } },
+        body: { email, blogId: blog.id },
         retries: 3,
       })
     );
