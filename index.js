@@ -14,12 +14,12 @@ import rateLimit from "express-rate-limit";
 import { body, validationResult } from "express-validator";
 import helmet from "helmet";
 import timeout from "express-timeout-handler";
-import { Client, Receiver } from "@upstash/qstash";
+
 
 dotenv.config({ debug: true });
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 3001;
 
 // Configure multer to use /tmp directory for Vercel
 const uploadDir = "/tmp/uploads";
@@ -61,7 +61,7 @@ const upload = multer({
 app.use(helmet());
 app.disable('x-powered-by');
 app.use(timeout.handler({
-  timeout: 10000, // 10 seconds
+  timeout: 60000, // 60 seconds
   onTimeout: (req, res) => {
     res.status(408).json({ success: false, error: 'Request timed out' });
   },
@@ -113,30 +113,23 @@ cloudinary.config({
 
 // Supabase Configuration
 const supabase = createClient(
-  process.env.SUPABASE_URL || "",
-  process.env.SUPABASE_KEY || ""
+  process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || "",
+  process.env.SUPABASE_KEY || process.env.VITE_SUPABASE_ANON_KEY || ""
 );
 
 // Email transporter configuration
 const transporter = nodemailer.createTransport({
   service: "gmail",
+  pool: true, // Use pooled connections
+  maxConnections: 5,
+  maxMessages: 100,
   auth: {
     user: "suryasunrise261@gmail.com",
     pass: "bgbd rdmx psjl rbfg ",
   },
 });
 
-// QStash client for publishing messages
-const qstashClient = new Client({
-  token: process.env.QSTASH_TOKEN,
-  baseUrl: process.env.QSTASH_URL, // For local dev: http://127.0.0.1:8080
-});
 
-// QStash receiver for verifying webhook signatures
-const qstashReceiver = new Receiver({
-  currentSigningKey: process.env.QSTASH_CURRENT_SIGNING_KEY,
-  nextSigningKey: process.env.QSTASH_NEXT_SIGNING_KEY,
-});
 
 // Generate HTML email template for blog
 const generateBlogEmailHTML = (blog, unsubscribeLink = "#") => {
@@ -640,7 +633,7 @@ app.get("/api/users", async (req, res) => {
   }
 });
 
-// Send blog email to selected recipients (via QStash in production, direct in dev)
+// Send blog email to selected recipients
 app.post("/api/send-blog-email", async (req, res) => {
   try {
     const { emails, blog } = req.body;
@@ -653,67 +646,23 @@ app.post("/api/send-blog-email", async (req, res) => {
       return res.status(400).json({ success: false, error: "Invalid blog data" });
     }
 
-    const isLocalDev = !process.env.VERCEL_URL && !process.env.BASE_URL;
+    const htmlContent = generateBlogEmailHTML(blog);
 
-    if (isLocalDev) {
-      // LOCAL DEV: Send emails directly (QStash can't reach localhost)
-      const htmlContent = generateBlogEmailHTML(blog);
-      let successCount = 0;
-      let failedEmails = [];
+    // Send email with BCC
+    await transporter.sendMail({
+      from: '"CodeSapiens Blog" <suryasunrise261@gmail.com>',
+      to: "suryasunrise261@gmail.com", // Send to self/admin as primary recipient
+      bcc: emails, // All recipients in BCC
+      subject: `📚 New Blog: ${blog.title}`,
+      html: htmlContent,
+    });
 
-      for (const email of emails) {
-        try {
-          await transporter.sendMail({
-            from: '"CodeSapiens Blog" <suryasunrise261@gmail.com>',
-            to: email,
-            subject: `📚 New Blog: ${blog.title}`,
-            html: htmlContent,
-          });
-          successCount++;
-          console.log(`[cAPi] : ✅ Email sent to ${email}`);
-        } catch (emailError) {
-          console.error(`[cAPi] : Failed to send to ${email}:`, emailError.message);
-          failedEmails.push(email);
-        }
-      }
-
-      return res.json({
-        success: true,
-        message: `Email sent to ${successCount} of ${emails.length} recipients (local mode)`,
-        successCount,
-        failedCount: failedEmails.length,
-      });
-    }
-
-    // PRODUCTION: Queue to QStash
-    const baseUrl = process.env.VERCEL_URL
-      ? `https://${process.env.VERCEL_URL}`
-      : process.env.BASE_URL;
-
-    console.log("[cAPi] : 📝 Blog object received:", JSON.stringify({ id: blog.id, title: blog.title, keys: Object.keys(blog) }));
-
-    // Add Vercel protection bypass token if available
-    const bypassToken = process.env.VERCEL_PROTECTION_BYPASS;
-    let webhookUrl = `${baseUrl}/api/qstash-send-email`;
-    if (bypassToken) {
-      webhookUrl += `?x-vercel-set-bypass-cookie=true&x-vercel-protection-bypass=${bypassToken}`;
-    }
-
-    // Since we already have the full blog, send it directly (it's small enough per email)
-    const queuePromises = emails.map(email =>
-      qstashClient.publishJSON({
-        url: webhookUrl,
-        body: { email, blog: { id: blog.id, title: blog.title, content: blog.content, excerpt: blog.excerpt, cover_image: blog.cover_image, slug: blog.slug } },
-        retries: 3,
-      })
-    );
-
-    await Promise.all(queuePromises);
+    console.log(`[cAPi] : ✅ Email sent to ${emails.length} recipients via BCC`);
 
     res.json({
       success: true,
-      message: `Queued ${emails.length} emails for delivery`,
-      queuedCount: emails.length,
+      message: `Email sent to ${emails.length} recipients`,
+      count: emails.length,
     });
 
   } catch (error) {
@@ -722,7 +671,7 @@ app.post("/api/send-blog-email", async (req, res) => {
   }
 });
 
-// Send blog email to all students (via QStash in production, direct in dev)
+// Send blog email to all users
 app.post("/api/send-blog-email-all", async (req, res) => {
   try {
     const { blog } = req.body;
@@ -731,79 +680,40 @@ app.post("/api/send-blog-email-all", async (req, res) => {
       return res.status(400).json({ success: false, error: "Invalid blog data" });
     }
 
-    // Fetch all student emails
-    const { data: students, error: fetchError } = await supabase
+    // Fetch all users (students and others)
+    const { data: users, error: fetchError } = await supabase
       .from("users")
-      .select("email")
-      .eq("role", "student");
+      .select("email");
 
     if (fetchError) throw fetchError;
 
-    if (!students || students.length === 0) {
-      return res.status(400).json({ success: false, error: "No students found" });
+    if (!users || users.length === 0) {
+      return res.status(400).json({ success: false, error: "No users found" });
     }
 
-    const emails = students.map(s => s.email).filter(Boolean);
-    const isLocalDev = !process.env.VERCEL_URL && !process.env.BASE_URL;
+    const emails = users.map(u => u.email).filter(Boolean);
 
-    if (isLocalDev) {
-      // LOCAL DEV: Send emails directly (QStash can't reach localhost)
-      const htmlContent = generateBlogEmailHTML(blog);
-      let successCount = 0;
-      let failedEmails = [];
-
-      for (const email of emails) {
-        try {
-          await transporter.sendMail({
-            from: '"CodeSapiens Blog" <suryasunrise261@gmail.com>',
-            to: email,
-            subject: `📚 New Blog: ${blog.title}`,
-            html: htmlContent,
-          });
-          successCount++;
-          console.log(`[cAPi] : ✅ Email sent to ${email}`);
-        } catch (emailError) {
-          console.error(`[cAPi] : Failed to send to ${email}:`, emailError.message);
-          failedEmails.push(email);
-        }
-      }
-
-      return res.json({
-        success: true,
-        message: `Email sent to ${successCount} of ${emails.length} students (local mode)`,
-        successCount,
-        totalStudents: students.length,
-        failedCount: failedEmails.length,
-      });
+    if (emails.length === 0) {
+      return res.status(400).json({ success: false, error: "No valid email addresses found" });
     }
 
-    // PRODUCTION: Queue to QStash
-    const baseUrl = process.env.VERCEL_URL
-      ? `https://${process.env.VERCEL_URL}`
-      : process.env.BASE_URL;
+    const htmlContent = generateBlogEmailHTML(blog);
 
-    // Add Vercel protection bypass token if available
-    const bypassToken = process.env.VERCEL_PROTECTION_BYPASS;
-    let webhookUrl = `${baseUrl}/api/qstash-send-email`;
-    if (bypassToken) {
-      webhookUrl += `?x-vercel-set-bypass-cookie=true&x-vercel-protection-bypass=${bypassToken}`;
-    }
+    // Send email with BCC
+    await transporter.sendMail({
+      from: '"CodeSapiens Blog" <suryasunrise261@gmail.com>',
+      to: "suryasunrise261@gmail.com", // Send to self/admin as primary recipient
+      bcc: emails, // All recipients in BCC
+      subject: `📚 New Blog: ${blog.title}`,
+      html: htmlContent,
+    });
 
-    const queuePromises = emails.map(email =>
-      qstashClient.publishJSON({
-        url: webhookUrl,
-        body: { email, blogId: blog.id },
-        retries: 3,
-      })
-    );
-
-    await Promise.all(queuePromises);
+    console.log(`[cAPi] : ✅ Email sent to ${emails.length} users via BCC`);
 
     res.json({
       success: true,
-      message: `Queued ${emails.length} emails for delivery to all students`,
-      queuedCount: emails.length,
-      totalStudents: students.length,
+      message: `Email sent to ${emails.length} users`,
+      count: emails.length,
     });
 
   } catch (error) {
@@ -857,77 +767,7 @@ app.get("/send-email", async (req, res) => {
   }
 });
 
-// ============================================
-// QSTASH WEBHOOK - Called by Upstash to send emails
-// ============================================
-app.post("/api/qstash-send-email", async (req, res) => {
-  try {
-    // Verify the request is from QStash (signature verification)
-    const signature = req.headers["upstash-signature"];
-    const body = JSON.stringify(req.body);
 
-    if (process.env.NODE_ENV === "production" && signature) {
-      const isValid = await qstashReceiver.verify({
-        signature,
-        body,
-      });
-
-      if (!isValid) {
-        console.error("[cAPi] : Invalid QStash signature");
-        return res.status(401).json({ error: "Invalid signature" });
-      }
-    }
-
-    const { email, blogId, blog: blogFromBody } = req.body;
-
-    // Debug: log what we received
-    console.log("[cAPi] : 📨 QStash webhook received:", JSON.stringify(req.body, null, 2));
-
-    if (!email) {
-      console.log("[cAPi] : ❌ Missing email");
-      return res.status(400).json({ error: "Missing email" });
-    }
-
-    let blog = blogFromBody;
-
-    // If blog not provided directly, fetch from Supabase using blogId
-    if (!blog && blogId) {
-      const { data: fetchedBlog, error: blogError } = await supabase
-        .from("blogs")
-        .select("*")
-        .eq("id", blogId)
-        .single();
-
-      if (blogError || !fetchedBlog) {
-        console.error("[cAPi] : Failed to fetch blog:", blogError?.message);
-        return res.status(404).json({ error: "Blog not found" });
-      }
-      blog = fetchedBlog;
-    }
-
-    if (!blog || !blog.title) {
-      console.log("[cAPi] : ❌ Missing blog data");
-      return res.status(400).json({ error: "Missing blog data" });
-    }
-
-    const htmlContent = generateBlogEmailHTML(blog);
-
-    await transporter.sendMail({
-      from: '"CodeSapiens Blog" <suryasunrise261@gmail.com>',
-      to: email,
-      subject: `📚 New Blog: ${blog.title}`,
-      html: htmlContent,
-    });
-
-    console.log(`[cAPi] : ✅ Email sent to ${email}`);
-    res.json({ success: true, message: `Email sent to ${email}` });
-
-  } catch (error) {
-    console.error(`[cAPi] : ❌ Failed to send email:`, error.message);
-    // Return 500 so QStash will retry
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
 
 // Health check endpoint
 app.get("/health", (req, res) => {
