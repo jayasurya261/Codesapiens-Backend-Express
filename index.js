@@ -114,7 +114,7 @@ cloudinary.config({
 // Supabase Configuration
 const supabase = createClient(
   process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || "",
-  process.env.SUPABASE_KEY || process.env.VITE_SUPABASE_ANON_KEY || ""
+  process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY || process.env.VITE_SUPABASE_ANON_KEY || ""
 );
 
 // Email transporter configuration
@@ -595,7 +595,233 @@ app.delete(
 );
 
 // ============================================
-// BLOG EMAIL API ENDPOINTS
+// HALL OF FAME IMAGE UPLOAD
+// ============================================
+
+// Configure multer for image uploads
+const imageStorage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    try {
+      if (!fs.existsSync(uploadDir)) {
+        fs.mkdirSync(uploadDir, { recursive: true });
+      }
+      cb(null, uploadDir);
+    } catch (error) {
+      cb(error, null);
+    }
+  },
+  filename: (req, file, cb) => {
+    const uniqueSuffix = `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
+    cb(null, `halloffame-${uniqueSuffix}${path.extname(file.originalname)}`);
+  },
+});
+
+const imageUpload = multer({
+  storage: imageStorage,
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5 MB limit
+  fileFilter: (req, file, cb) => {
+    const allowedMimes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
+    if (!allowedMimes.includes(file.mimetype)) {
+      return cb(new Error('Only JPEG, PNG, GIF, and WEBP images are allowed'), false);
+    }
+    cb(null, true);
+  },
+});
+
+app.post(
+  "/upload-hall-of-fame",
+  uploadLimiter,
+  imageUpload.single("image"),
+  [
+    body('studentName').optional().isString().trim(),
+    body('description').optional().isString().trim(),
+  ],
+  async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ success: false, errors: errors.array() });
+    }
+
+    const inputPath = req.file?.path;
+    if (!inputPath) {
+      return res.status(400).json({ success: false, error: "No image file uploaded" });
+    }
+
+    const { studentName, description } = req.body;
+
+    try {
+      // Upload to Cloudinary
+      const result = await cloudinary.uploader.upload(inputPath, {
+        resource_type: "image",
+        folder: "hall-of-fame",
+        transformation: [
+          { width: 800, height: 800, crop: "limit" }, // Resize to max 800x800
+          { quality: "auto:good" }, // Auto optimize quality
+        ],
+      });
+
+      // Insert into Supabase
+      const { data: insertedEntry, error: insertError } = await supabase
+        .from("hall_of_fame")
+        .insert({
+          image_url: result.secure_url,
+          student_name: studentName || null,
+          description: description || null,
+          is_active: true,
+        })
+        .select()
+        .single();
+
+      if (insertError) {
+        throw new Error(`Failed to insert entry into database: ${insertError.message}`);
+      }
+
+      // Cleanup temp file
+      try {
+        if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
+      } catch (cleanupErr) {
+        console.error("[cAPi] : Cleanup failed", cleanupErr.message);
+      }
+
+      console.log("[cAPi] : Hall of Fame image uploaded successfully:", result.secure_url);
+      res.json({
+        success: true,
+        url: result.secure_url,
+        entry: insertedEntry,
+      });
+    } catch (error) {
+      console.error("[cAPi] : Hall of Fame upload error", error.message);
+
+      // Cleanup temp file on error
+      try {
+        if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
+      } catch (cleanupErr) {
+        console.error("[cAPi] : Cleanup failed", cleanupErr.message);
+      }
+
+      res.status(500).json({ success: false, error: error.message });
+    }
+  }
+);
+// ============================================
+
+// ============================================
+// COMMUNITY PHOTOS UPLOAD
+// ============================================
+
+app.post(
+  "/upload-community-photo",
+  uploadLimiter,
+  imageUpload.single("image"),
+  [
+    body('title').notEmpty().withMessage('Title is required').isString().trim(),
+    body('date').optional().isString().trim(),
+    body('description').optional().isString().trim(),
+    body('participants').optional().isInt({ min: 0 }).withMessage('Participants must be a non-negative integer'),
+    body('orderNumber').optional().isInt({ min: 0 }).withMessage('Order number must be a non-negative integer'),
+  ],
+  async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ success: false, errors: errors.array() });
+    }
+
+    const inputPath = req.file?.path;
+    if (!inputPath) {
+      return res.status(400).json({ success: false, error: "No image file uploaded" });
+    }
+
+    const { title, date, description, participants, orderNumber } = req.body;
+
+    try {
+      // Upload to Cloudinary
+      const result = await cloudinary.uploader.upload(inputPath, {
+        resource_type: "image",
+        folder: "community-photos",
+        transformation: [
+          { width: 1200, height: 800, crop: "limit" },
+          { quality: "auto:good" },
+        ],
+      });
+
+      // Insert into Supabase
+      const { data: insertedEntry, error: insertError } = await supabase
+        .from("community_photos")
+        .insert({
+          title: title,
+          image_url: result.secure_url,
+          date: date || null,
+          description: description || null,
+          participants: parseInt(participants) || 0,
+          order_number: parseInt(orderNumber) || 0,
+          is_active: true,
+        })
+        .select()
+        .single();
+
+      if (insertError) {
+        throw new Error(`Failed to insert entry into database: ${insertError.message}`);
+      }
+
+      // Cleanup temp file
+      try {
+        if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
+      } catch (cleanupErr) {
+        console.error("[cAPi] : Cleanup failed", cleanupErr.message);
+      }
+
+      console.log("[cAPi] : Community photo uploaded successfully:", result.secure_url);
+      res.json({
+        success: true,
+        url: result.secure_url,
+        entry: insertedEntry,
+      });
+    } catch (error) {
+      console.error("[cAPi] : Community photo upload error", error.message);
+
+      // Cleanup temp file on error
+      try {
+        if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
+      } catch (cleanupErr) {
+        console.error("[cAPi] : Cleanup failed", cleanupErr.message);
+      }
+
+      res.status(500).json({ success: false, error: error.message });
+    }
+  }
+);
+
+// Update community photo order (bulk update)
+app.put("/update-community-photo-order", async (req, res) => {
+  try {
+    const { updates } = req.body;
+
+    if (!updates || !Array.isArray(updates)) {
+      return res.status(400).json({ success: false, error: "Updates array is required" });
+    }
+
+    // Update each photo's order number
+    for (const update of updates) {
+      const { id, order_number } = update;
+      if (!id || typeof order_number !== 'number') continue;
+
+      const { error } = await supabase
+        .from("community_photos")
+        .update({ order_number })
+        .eq("id", id);
+
+      if (error) {
+        console.error(`[cAPi] : Failed to update order for ${id}:`, error.message);
+      }
+    }
+
+    console.log(`[cAPi] : Updated order for ${updates.length} community photos`);
+    res.json({ success: true, message: `Updated ${updates.length} entries` });
+  } catch (error) {
+    console.error("[cAPi] : Community photo order update error:", error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
 // ============================================
 
 // Get all students
