@@ -995,6 +995,55 @@ app.get("/send-email", async (req, res) => {
 
 
 
+// Public Stats Endpoint
+app.get("/api/public-stats", async (req, res) => {
+  try {
+    // 1. Total Users
+    const { count: userCount, error: userError } = await supabase
+      .from("users")
+      .select("*", { count: "exact", head: true });
+
+    if (userError) throw userError;
+
+    // 2. Colleges Stats (Top 5)
+    // Fetch all users (service key allows this) to aggregate in memory
+    const { data: users, error: dataError } = await supabase
+      .from("users")
+      .select("college");
+
+    if (dataError) throw dataError;
+
+    const collegeMap = {};
+    users.forEach(u => {
+      // Normalize college name (trim, etc) if needed
+      const c = u.college ? u.college.trim() : "Others";
+      if (c !== "Others" && c !== "Codesapiens Univ") {
+        collegeMap[c] = (collegeMap[c] || 0) + 1;
+      }
+    });
+
+    const uniqueColleges = Object.keys(collegeMap).length;
+
+    const topColleges = Object.entries(collegeMap)
+      .sort(([, a], [, b]) => b - a)
+      .slice(0, 5)
+      .map(([name, count]) => ({ name, count }));
+
+    res.json({
+      success: true,
+      stats: {
+        totalUsers: userCount,
+        totalColleges: uniqueColleges,
+        topColleges
+      }
+    });
+
+  } catch (error) {
+    console.error("[cAPi] : Stats error:", error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // Health check endpoint
 app.get("/health", (req, res) => {
   res.json({
