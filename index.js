@@ -15,6 +15,8 @@ import { body, validationResult } from "express-validator";
 import helmet from "helmet";
 import timeout from "express-timeout-handler";
 
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+
 
 dotenv.config({ debug: true });
 
@@ -87,19 +89,72 @@ const captchaLimiter = rateLimit({
   message: 'Too many captcha verification requests, please try again later.',
 });
 
-// CORS Middleware
+// CORS Configuration
+const allowedOrigins = [
+  "https://codesapiens.in",
+  "https://www.codesapiens.in",
+  "http://localhost:5173",
+  "http://localhost:3000",
+  "https://codesapiens-site.vercel.app",
+  "https://colleges-name-api.vercel.app"
+];
+
 app.use(cors({
-  origin: "*",
-  methods: ["GET", "POST", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization", "keyword", "state", "district", "offset"],
+  origin: (origin, callback) => {
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.indexOf(origin) === -1) {
+      const msg = 'The CORS policy for this site does not allow access from the specified Origin.';
+      return callback(new Error(msg), false);
+    }
+    return callback(null, true);
+  },
+  methods: ["GET", "POST", "DELETE", "OPTIONS", "PUT"],
+  allowedHeaders: ["Content-Type", "Authorization", "x-client-source", "keyword", "state", "district", "offset"],
+  credentials: true
 }));
 
-app.use((req, res, next) => {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, keyword, state, district, offset");
+// Client Source Verification Middleware
+const verifyClientSource = (req, res, next) => {
+  const clientSource = req.headers['x-client-source'];
+  // Allow requests without source if they are simple GETs to root/health
+  if (req.path === '/' || req.path === '/health') return next();
+
+  if (clientSource !== 'codesapiens-web') {
+    console.warn(`[Security] Blocked request from invalid source: ${clientSource} Path: ${req.path}`);
+    return res.status(403).json({ success: false, error: 'Unauthorized Client Source' });
+  }
   next();
-});
+};
+
+// Authentication Verification Middleware
+const verifyAuth = async (req, res, next) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader) {
+    return res.status(401).json({ success: false, error: 'Missing authentication token' });
+  }
+
+  const token = authHeader.split(' ')[1];
+  if (!token) {
+    return res.status(401).json({ success: false, error: 'Invalid authentication format' });
+  }
+
+  try {
+    const { data: { user }, error } = await supabase.auth.getUser(token);
+
+    if (error || !user) {
+      console.error("[Security] Invalid token:", error?.message);
+      return res.status(401).json({ success: false, error: 'Invalid or expired token' });
+    }
+
+    req.user = user;
+    next();
+  } catch (err) {
+    console.error("[Security] Auth verification error:", err);
+    return res.status(500).json({ success: false, error: 'Authentication failed' });
+  }
+};
+
+app.use(verifyClientSource);
 
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
@@ -275,13 +330,14 @@ app.get("/", (req, res) => {
   });
 });
 
-app.post("/colleges/total", (req, res) => {
+app.post("/colleges/total", verifyAuth, (req, res) => {
   if (!colleges) return res.status(500).json({ error: "Data not loaded" });
   res.json({ total: colleges.length });
 });
 
 app.post(
   "/colleges/search",
+  verifyAuth,
   [
     body('keyword').optional().isString().trim().escape(),
   ],
@@ -308,6 +364,7 @@ app.post(
 
 app.post(
   "/colleges/state",
+  verifyAuth,
   [
     body('state').notEmpty().withMessage('State is required').isString().trim().escape(),
     body('offset').optional().isInt({ min: 0 }).withMessage('Offset must be a non-negative integer'),
@@ -337,6 +394,7 @@ app.post(
 
 app.post(
   "/colleges/district",
+  verifyAuth,
   [
     body('district').notEmpty().withMessage('District is required').isString().trim().escape(),
     body('offset').optional().isInt({ min: -1 }).withMessage('Offset must be an integer'),
@@ -364,7 +422,7 @@ app.post(
   }
 );
 
-app.post("/allstates", (req, res) => {
+app.post("/allstates", verifyAuth, (req, res) => {
   if (!colleges) return res.status(500).json({ error: "Data not loaded" });
   const result = [...new Set(colleges.slice(1).map((row) => row[4]))];
   res.json(result);
@@ -372,6 +430,7 @@ app.post("/allstates", (req, res) => {
 
 app.post(
   "/districts",
+  verifyAuth,
   [
     body('state').notEmpty().withMessage('State is required').isString().trim().escape(),
   ],
@@ -472,6 +531,7 @@ app.post("/verify-turnstile", captchaLimiter, async (req, res) => {
 
 app.post(
   "/upload-resume",
+  verifyAuth,
   uploadLimiter,
   upload.single("resume"),
   [
@@ -538,13 +598,14 @@ app.options("/delete-resume", (req, res) => {
   res.set({
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "DELETE, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization, x-client-source",
   });
   res.sendStatus(204);
 });
 
 app.delete(
   "/delete-resume",
+  verifyAuth,
   [
     body('userId').notEmpty().withMessage('userId is required').isString().withMessage('userId must be a string'),
   ],
@@ -630,6 +691,7 @@ const imageUpload = multer({
 
 app.post(
   "/upload-hall-of-fame",
+  verifyAuth,
   uploadLimiter,
   imageUpload.single("image"),
   [
@@ -711,6 +773,7 @@ app.post(
 
 app.post(
   "/upload-community-photo",
+  verifyAuth,
   uploadLimiter,
   imageUpload.single("image"),
   [
@@ -738,6 +801,7 @@ app.post(
       const result = await cloudinary.uploader.upload(inputPath, {
         resource_type: "image",
         folder: "community-photos",
+
         transformation: [
           { width: 1200, height: 800, crop: "limit" },
           { quality: "auto:good" },
@@ -792,7 +856,7 @@ app.post(
 );
 
 // Update community photo order (bulk update)
-app.put("/update-community-photo-order", async (req, res) => {
+app.put("/update-community-photo-order", verifyAuth, async (req, res) => {
   try {
     const { updates } = req.body;
 
@@ -825,7 +889,7 @@ app.put("/update-community-photo-order", async (req, res) => {
 // ============================================
 
 // Get all students
-app.get("/api/students", async (req, res) => {
+app.get("/api/students", verifyAuth, async (req, res) => {
   try {
     const { data, error } = await supabase
       .from("users")
@@ -843,7 +907,7 @@ app.get("/api/students", async (req, res) => {
 });
 
 // Get all users (including non-students)
-app.get("/api/users", async (req, res) => {
+app.get("/api/users", verifyAuth, async (req, res) => {
   try {
     const { data, error } = await supabase
       .from("users")
@@ -860,7 +924,7 @@ app.get("/api/users", async (req, res) => {
 });
 
 // Send blog email to selected recipients
-app.post("/api/send-blog-email", async (req, res) => {
+app.post("/api/send-blog-email", verifyAuth, async (req, res) => {
   try {
     const { emails, blog } = req.body;
 
@@ -898,7 +962,7 @@ app.post("/api/send-blog-email", async (req, res) => {
 });
 
 // Send blog email to all users
-app.post("/api/send-blog-email-all", async (req, res) => {
+app.post("/api/send-blog-email-all", verifyAuth, async (req, res) => {
   try {
     const { blog } = req.body;
 
@@ -949,7 +1013,7 @@ app.post("/api/send-blog-email-all", async (req, res) => {
 });
 
 // Test email endpoint
-app.post("/api/test-email", async (req, res) => {
+app.post("/api/test-email", verifyAuth, async (req, res) => {
   try {
     const { email } = req.body;
 
@@ -1041,6 +1105,86 @@ app.get("/api/public-stats", async (req, res) => {
   } catch (error) {
     console.error("[cAPi] : Stats error:", error);
     res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Gemini Wrapper Endpoint
+app.post("/api/analyze-resume", async (req, res) => {
+  try {
+    const { resumeText, jobDescription, analysisMode } = req.body;
+
+    if (!GEMINI_API_KEY) {
+      console.error("GEMINI_API_KEY is not set in environment variables");
+      return res.status(500).json({ error: "Server configuration error: Gemini API key missing" });
+    }
+
+    if (!resumeText) {
+      return res.status(400).json({ error: "Missing resume text" });
+    }
+
+    let prompt = '';
+
+    if (analysisMode === 'jd') {
+      prompt = `
+            You are an expert ATS (Applicant Tracking System) and Career Coach.
+            Compare the following Resume text against the Job Description (JD).
+            
+            Resume Text:
+            ${resumeText}
+            
+            Job Description:
+            ${jobDescription}
+            
+            Provide a detailed analysis in strictly raw JSON format (no markdown code blocks, no explanation text).
+            Ensure all strings are properly escaped.
+            The JSON structure must be:
+            {
+              "matchPercentage": number (0-100),
+              "summary": "string (brief overview of fit)",
+              "strengths": "markdown string (bullet points)",
+              "weaknesses": "markdown string (missing skills/experience)",
+              "improvements": "markdown string (concrete suggestions to improve the resume for this JD)"
+            }
+        `;
+    } else {
+      prompt = `
+            You are an expert Career Coach and Resume Reviewer.
+            Analyze the following Resume text to provide general feedback on how to improve it for a professional career.
+            
+            Resume Text:
+            ${resumeText}
+            
+            Provide a detailed analysis in strictly raw JSON format (no markdown code blocks, no explanation text).
+            Ensure all strings are properly escaped.
+            The JSON structure must be:
+            {
+              "matchPercentage": number (0-100, representing overall resume quality score),
+              "summary": "string (brief summary of the candidate's profile)",
+              "strengths": "markdown string (strong points of the resume)",
+              "weaknesses": "markdown string (formatting issues, missing sections, unclear descriptions)",
+              "improvements": "markdown string (actionable tips to make the resume stand out generally)"
+            }
+        `;
+    }
+
+    const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent';
+
+    const response = await fetch(`${GEMINI_API_URL}?key=${GEMINI_API_KEY}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
+    });
+
+    if (!response.ok) {
+      throw new Error(`AI Analysis failed: ${response.statusText}`);
+    }
+
+    const result = await response.json();
+    return res.json(result);
+
+  } catch (error) {
+    console.error("Error in /api/analyze-resume:", error);
+    res.status(500).json({ error: error.message || "Internal Server Error" });
   }
 });
 
